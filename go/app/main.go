@@ -4,9 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
@@ -32,27 +32,79 @@ type Item struct {
 	Image    string `json:"image"`
 }
 
-var items = make(map[string][]Item)
-
 func root(c echo.Context) error {
 	res := Response{Message: "Hello, world!"}
 	return c.JSON(http.StatusOK, res)
 }
 
-func getFileContent() {
+func getFileContent(c echo.Context) (map[string][]Item, error) {
 	// Get data from items.json
 	f, err := os.OpenFile("items.json", os.O_RDONLY|os.O_CREATE, os.ModePerm)
 	if err != nil {
-		fmt.Println("error")
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
 	}
 	defer f.Close()
 
 	bytes, err := ioutil.ReadAll(f)
 	if err != nil {
-		fmt.Println("error")
-		return
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
 	}
-	json.Unmarshal(bytes, &items)
+	items := make(map[string][]Item)
+	if len(bytes) > 0 {
+		err = json.Unmarshal(bytes, &items)
+		if err != nil {
+			c.Logger().Errorf("err: %v", err)
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func imageHash(image *multipart.FileHeader, c echo.Context) ([]byte, error) {
+	imagePath := path.Join(ImgDir, image.Filename)
+	imageFile, err := os.Open(imagePath)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
+	}
+	defer imageFile.Close()
+
+	// Hashing image file
+	hash := sha256.New()
+	if _, err := io.Copy(hash, imageFile); err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
+	}
+	hashedImage := hash.Sum(nil)
+
+	c.Logger().Infof("Receive image: %x.jpg", hashedImage)
+	return hashedImage, nil
+}
+
+func writeItems(item Item, c echo.Context) error {
+	// Add item to item.json
+	items, err := getFileContent(c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	// items := make(map[string][]Item)
+	items["items"] = append(items["items"], item)
+	jsonData, err := json.Marshal(items)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+
+	f, err := os.OpenFile("items.json", os.O_WRONLY, os.ModePerm)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	f.Write(jsonData)
+	return nil
 }
 
 func addItem(c echo.Context) error {
@@ -65,54 +117,35 @@ func addItem(c echo.Context) error {
 
 	image, err := c.FormFile("image")
 	if err != nil {
-		c.Logger().Errorf("err: %v", err)
+		c.Logger().Errorf("Image not found: %s", image.Filename)
 		return err
 	}
 
-	imagePath := path.Join(ImgDir, image.Filename)
-	imageFile, err := os.Open(imagePath)
-	if err != nil {
-		c.Logger().Errorf("err: %v", err)
-		return err
-	}
-	defer imageFile.Close()
-
-	// Hashing image file
-	hash := sha256.New()
-	if _, err := io.Copy(hash, imageFile); err != nil {
-		c.Logger().Errorf("err: %v", err)
-		return err
-	}
-	hashedImage := hash.Sum(nil)
-
-	c.Logger().Infof("Receive image: %x.jpg", hashedImage)
+	hashedImage, _ := imageHash(image, c)
 	stringHashedImage := hex.EncodeToString(hashedImage) + ".jpg"
 
-	message := fmt.Sprintf("item received: %s, category: %s, image_filename: %s", name, category, stringHashedImage)
-	res := Response{Message: message}
+	item := Item{Name: name, Category: category, Image: stringHashedImage}
 
-	// Add item to item.json
-	getFileContent()
-	items["items"] = append(items["items"], Item{Name: name, Category: category, Image: stringHashedImage})
-	jsonData, _ := json.Marshal(items)
+	writeItems(item, c)
 
-	f, err := os.OpenFile("items.json", os.O_WRONLY, os.ModePerm)
-	if err != nil {
-		c.Logger().Errorf("err: %v", err)
-		return err
-	}
-	f.Write(jsonData)
-
-	return c.JSON(http.StatusOK, res)
+	return c.JSON(http.StatusOK, &item)
 }
 
 func returnItemList(c echo.Context) error {
-	getFileContent()
+	items, err := getFileContent(c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 	return c.JSON(http.StatusOK, items)
 }
 
 func returnItem(c echo.Context) error {
-	getFileContent()
+	items, err := getFileContent(c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 	i, _ := strconv.Atoi(c.Param("itemName"))
 	item := items["items"][i]
 	return c.JSON(http.StatusOK, item)
