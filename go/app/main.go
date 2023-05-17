@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -46,7 +45,7 @@ func getFileContent(c echo.Context) (map[string][]Item, error) {
 	}
 	defer f.Close()
 
-	bytes, err := ioutil.ReadAll(f)
+	bytes, err := io.ReadAll(f)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
 		return nil, err
@@ -90,7 +89,6 @@ func writeItems(item Item, c echo.Context) error {
 		c.Logger().Errorf("err: %v", err)
 		return err
 	}
-	// items := make(map[string][]Item)
 	items["items"] = append(items["items"], item)
 	jsonData, err := json.Marshal(items)
 	if err != nil {
@@ -121,7 +119,11 @@ func addItem(c echo.Context) error {
 		return err
 	}
 
-	hashedImage, _ := imageHash(image, c)
+	hashedImage, err := imageHash(image, c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 	stringHashedImage := hex.EncodeToString(hashedImage) + ".jpg"
 
 	item := Item{Name: name, Category: category, Image: stringHashedImage}
