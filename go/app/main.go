@@ -102,6 +102,7 @@ func writeItems(item Item, c echo.Context) error {
 		return err
 	}
 	f.Write(jsonData)
+	defer f.Close()
 	return nil
 }
 
@@ -148,7 +149,11 @@ func returnItem(c echo.Context) error {
 		c.Logger().Errorf("err: %v", err)
 		return err
 	}
-	i, _ := strconv.Atoi(c.Param("itemName"))
+	i, err := strconv.Atoi(c.Param("itemName"))
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 	item := items["items"][i]
 	return c.JSON(http.StatusOK, item)
 }
