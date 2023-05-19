@@ -1,10 +1,15 @@
 package main
 
 import (
-	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -20,9 +25,85 @@ type Response struct {
 	Message string `json:"message"`
 }
 
+type Item struct {
+	Name     string `json:"name"`
+	Category string `json:"category"`
+	Image    string `json:"image"`
+}
+
 func root(c echo.Context) error {
 	res := Response{Message: "Hello, world!"}
 	return c.JSON(http.StatusOK, res)
+}
+
+func getFileContent(c echo.Context) (map[string][]Item, error) {
+	// Get data from items.json
+	f, err := os.OpenFile("items.json", os.O_RDONLY|os.O_CREATE, os.ModePerm)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
+	}
+	defer f.Close()
+
+	bytes, err := io.ReadAll(f)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
+	}
+	items := make(map[string][]Item)
+	if len(bytes) > 0 {
+		err = json.Unmarshal(bytes, &items)
+		if err != nil {
+			c.Logger().Errorf("err: %v", err)
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func imageHash(image *multipart.FileHeader, c echo.Context) ([]byte, error) {
+	imagePath := path.Join(ImgDir, image.Filename)
+	imageFile, err := os.Open(imagePath)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
+	}
+	defer imageFile.Close()
+
+	// Hashing image file
+	hash := sha256.New()
+	if _, err := io.Copy(hash, imageFile); err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return nil, err
+	}
+	hashedImage := hash.Sum(nil)
+
+	c.Logger().Infof("Receive image: %x.jpg", hashedImage)
+	return hashedImage, nil
+}
+
+func writeItems(item Item, c echo.Context) error {
+	// Add item to item.json
+	items, err := getFileContent(c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	items["items"] = append(items["items"], item)
+	jsonData, err := json.Marshal(items)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+
+	f, err := os.OpenFile("items.json", os.O_WRONLY, os.ModePerm)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	f.Write(jsonData)
+	defer f.Close()
+	return nil
 }
 
 func addItem(c echo.Context) error {
@@ -30,10 +111,51 @@ func addItem(c echo.Context) error {
 	name := c.FormValue("name")
 	c.Logger().Infof("Receive item: %s", name)
 
-	message := fmt.Sprintf("item received: %s", name)
-	res := Response{Message: message}
+	category := c.FormValue("category")
+	c.Logger().Infof("Receive category: %s", category)
 
-	return c.JSON(http.StatusOK, res)
+	image, err := c.FormFile("image")
+	if err != nil {
+		c.Logger().Errorf("Image not found: %s", image.Filename)
+		return err
+	}
+
+	hashedImage, err := imageHash(image, c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	stringHashedImage := hex.EncodeToString(hashedImage) + ".jpg"
+
+	item := Item{Name: name, Category: category, Image: stringHashedImage}
+
+	writeItems(item, c)
+
+	return c.JSON(http.StatusOK, &item)
+}
+
+func returnItemList(c echo.Context) error {
+	items, err := getFileContent(c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	return c.JSON(http.StatusOK, items)
+}
+
+func returnItem(c echo.Context) error {
+	items, err := getFileContent(c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	i, err := strconv.Atoi(c.Param("itemName"))
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	item := items["items"][i]
+	return c.JSON(http.StatusOK, item)
 }
 
 func getImg(c echo.Context) error {
@@ -72,7 +194,8 @@ func main() {
 	e.GET("/", root)
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
-
+	e.GET("/items", returnItemList)
+	e.GET("/items/:itemName", returnItem)
 
 	// Start server
 	e.Logger.Fatal(e.Start(":9000"))
