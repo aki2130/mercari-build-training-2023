@@ -2,20 +2,21 @@ package main
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
+	"strconv"
+
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
@@ -37,29 +38,22 @@ func root(c echo.Context) error {
 	return c.JSON(http.StatusOK, res)
 }
 
-func getFileContent(c echo.Context) (map[string][]Item, error) {
-	// Get data from items.json
-	f, err := os.OpenFile("items.json", os.O_RDONLY|os.O_CREATE, os.ModePerm)
+func getData(c echo.Context) (*sql.Rows, error) {
+	// Get all data form database
+	db, err := sql.Open("sqlite3", "../db/mercari.sqlite3")
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
 		return nil, err
 	}
-	defer f.Close()
-
-	bytes, err := ioutil.ReadAll(f)
+	rows, err := db.Query(
+		`SELECT * FROM items inner join category on items.category_id = category.id `,
+	)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
 		return nil, err
 	}
-	items := make(map[string][]Item)
-	if len(bytes) > 0 {
-		err = json.Unmarshal(bytes, &items)
-		if err != nil {
-			c.Logger().Errorf("err: %v", err)
-			return nil, err
-		}
-	}
-	return items, nil
+	defer db.Close()
+	return rows, nil
 }
 
 func imageHash(image *multipart.FileHeader, c echo.Context) ([]byte, error) {
@@ -83,32 +77,82 @@ func imageHash(image *multipart.FileHeader, c echo.Context) ([]byte, error) {
 	return hashedImage, nil
 }
 
-func writeItems(item Item, c echo.Context) error {
-	// Add item to item.json
-	items, err := getFileContent(c)
+func searchCategory(cat string, c echo.Context) (int, error) {
+	// Find out if a category exists
+	db, err := sql.Open("sqlite3", "../db/mercari.sqlite3")
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		return -1, err
 	}
-	// items := make(map[string][]Item)
-	items["items"] = append(items["items"], item)
-	jsonData, err := json.Marshal(items)
-	if err != nil {
-		c.Logger().Errorf("err: %v", err)
-		return err
-	}
+	defer db.Close()
 
-	f, err := os.OpenFile("items.json", os.O_WRONLY, os.ModePerm)
+	rows, err := db.Query(
+		`SELECT * FROM category`,
+	)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return -1, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int
+		var category string
+
+		err := rows.Scan(&id, &category)
+		if err != nil {
+			c.Logger().Errorf("rows.Sran(): %v", err)
+			return -1, err
+		}
+
+		if category == cat {
+			return id, nil
+		}
+	}
+	result, err := db.Exec(
+		`INSERT INTO category (name) VALUES (?)`,
+		cat,
+	)
+	if err != nil {
+		c.Logger().Errorf("rows.Sran(): %v", err)
+		return -1, err
+	}
+	newID, err := result.LastInsertId()
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return -1, err
+	}
+	return int(newID), nil
+}
+
+func postItems(item Item, c echo.Context) error {
+	// Add item to items
+	db, err := sql.Open("sqlite3", "../db/mercari.sqlite3")
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
 		return err
 	}
-	f.Write(jsonData)
+	categoryId, err := searchCategory(item.Category, c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
+	c.Logger().Infof("Receive categoryID: %d", categoryId)
+	_, err = db.Exec(
+		`INSERT INTO items (name, category_id, image_filename) VALUES (?, ?, ?)`,
+		item.Name,
+		categoryId,
+		item.Image,
+	)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 	return nil
 }
 
 func addItem(c echo.Context) error {
-	// Get form data
+	// Add data to database
 	name := c.FormValue("name")
 	c.Logger().Infof("Receive item: %s", name)
 
@@ -121,34 +165,84 @@ func addItem(c echo.Context) error {
 		return err
 	}
 
-	hashedImage, _ := imageHash(image, c)
+	hashedImage, err := imageHash(image, c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 	stringHashedImage := hex.EncodeToString(hashedImage) + ".jpg"
 
 	item := Item{Name: name, Category: category, Image: stringHashedImage}
 
-	writeItems(item, c)
+	err = postItems(item, c)
+	if err != nil {
+		c.Logger().Errorf("err: %v", err)
+		return err
+	}
 
 	return c.JSON(http.StatusOK, &item)
 }
 
 func returnItemList(c echo.Context) error {
-	items, err := getFileContent(c)
+	// Return all items
+	rows, err := getData(c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
 		return err
 	}
+
+	items := make(map[string][]Item)
+	for rows.Next() {
+		var id int
+		var name string
+		var category string
+		var image_name string
+		var category_id int
+		var category_name string
+
+		err := rows.Scan(&id, &name, &category, &image_name, &category_id, &category_name)
+		if err != nil {
+			c.Logger().Errorf("rows.Sran(): %v", err)
+			return err
+		}
+
+		item := Item{Name: name, Category: category_name, Image: image_name}
+		items["items"] = append(items["items"], item)
+	}
+	defer rows.Close()
 	return c.JSON(http.StatusOK, items)
 }
 
-func returnItem(c echo.Context) error {
-	items, err := getFileContent(c)
+func searchItem(c echo.Context) error {
+	// search items matching the keyword
+	query := c.QueryParam("keyword")
+	rows, err := getData(c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
 		return err
 	}
-	i, _ := strconv.Atoi(c.Param("itemName"))
-	item := items["items"][i]
-	return c.JSON(http.StatusOK, item)
+
+	searchedItems := make(map[string][]Item)
+	for rows.Next() {
+		var id int
+		var name string
+		var category int
+		var image_name string
+		var category_id int
+		var category_name string
+
+		err := rows.Scan(&id, &name, &category, &image_name, &category_id, &category_name)
+		if err != nil {
+			c.Logger().Errorf("err: %v", err)
+			return err
+		}
+		if strconv.Itoa(id) == query || name == query || category_name == query || image_name == query {
+			item := Item{Name: name, Category: category_name, Image: image_name}
+			searchedItems["items"] = append(searchedItems["items"], item)
+		}
+	}
+	defer rows.Close()
+	return c.JSON(http.StatusOK, searchedItems)
 }
 
 func getImg(c echo.Context) error {
@@ -188,7 +282,7 @@ func main() {
 	e.POST("/items", addItem)
 	e.GET("/image/:imageFilename", getImg)
 	e.GET("/items", returnItemList)
-	e.GET("/items/:itemName", returnItem)
+	e.GET("/search", searchItem)
 
 	// Start server
 	e.Logger.Fatal(e.Start(":9000"))
