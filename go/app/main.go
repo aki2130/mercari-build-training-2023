@@ -43,16 +43,18 @@ func getData(c echo.Context) (*sql.Rows, error) {
 	db, err := sql.Open("sqlite3", "../db/mercari.sqlite3")
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return nil, err
+		res := Response{Message: "Fail to open database"}
+		return nil, c.JSON(http.StatusInternalServerError, res)
 	}
+	defer db.Close()
 	rows, err := db.Query(
 		`SELECT * FROM items inner join category on items.category_id = category.id `,
 	)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return nil, err
+		res := Response{Message: "Query is not valid"}
+		return nil, c.JSON(http.StatusInternalServerError, res)
 	}
-	defer db.Close()
 	return rows, nil
 }
 
@@ -61,7 +63,8 @@ func imageHash(image *multipart.FileHeader, c echo.Context) ([]byte, error) {
 	imageFile, err := os.Open(imagePath)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return nil, err
+		res := Response{Message: "Image is not valid"}
+		return nil, c.JSON(http.StatusBadRequest, res)
 	}
 	defer imageFile.Close()
 
@@ -69,7 +72,8 @@ func imageHash(image *multipart.FileHeader, c echo.Context) ([]byte, error) {
 	hash := sha256.New()
 	if _, err := io.Copy(hash, imageFile); err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return nil, err
+		res := Response{Message: "Fail to hash image"}
+		return nil, c.JSON(http.StatusInternalServerError, res)
 	}
 	hashedImage := hash.Sum(nil)
 
@@ -82,7 +86,8 @@ func searchCategory(cat string, c echo.Context) (int, error) {
 	db, err := sql.Open("sqlite3", "../db/mercari.sqlite3")
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return -1, err
+		res := Response{Message: "Fail to open database"}
+		return -1, c.JSON(http.StatusInternalServerError, res)
 	}
 	defer db.Close()
 
@@ -91,7 +96,8 @@ func searchCategory(cat string, c echo.Context) (int, error) {
 	)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return -1, err
+		res := Response{Message: "Query is not valid"}
+		return -1, c.JSON(http.StatusInternalServerError, res)
 	}
 	defer rows.Close()
 
@@ -101,8 +107,9 @@ func searchCategory(cat string, c echo.Context) (int, error) {
 
 		err := rows.Scan(&id, &category)
 		if err != nil {
-			c.Logger().Errorf("rows.Sran(): %v", err)
-			return -1, err
+			c.Logger().Errorf("err: %v", err)
+			res := Response{Message: "Fail to get record"}
+			return -1, c.JSON(http.StatusInternalServerError, res)
 		}
 
 		if category == cat {
@@ -114,13 +121,15 @@ func searchCategory(cat string, c echo.Context) (int, error) {
 		cat,
 	)
 	if err != nil {
-		c.Logger().Errorf("rows.Sran(): %v", err)
-		return -1, err
+		c.Logger().Errorf("err: %v", err)
+		res := Response{Message: "Query is not valid"}
+		return -1, c.JSON(http.StatusInternalServerError, res)
 	}
 	newID, err := result.LastInsertId()
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return -1, err
+		res := Response{Message: "Fail to get category id"}
+		return -1, c.JSON(http.StatusInternalServerError, res)
 	}
 	return int(newID), nil
 }
@@ -130,12 +139,15 @@ func postItems(item Item, c echo.Context) error {
 	db, err := sql.Open("sqlite3", "../db/mercari.sqlite3")
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		res := Response{Message: "Fail to open database"}
+		return c.JSON(http.StatusInternalServerError, res)
 	}
+	defer db.Close()
 	categoryId, err := searchCategory(item.Category, c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		res := Response{Message: "Fail to search category"}
+		return c.JSON(http.StatusInternalServerError, res)
 	}
 	c.Logger().Infof("Receive categoryID: %d", categoryId)
 	_, err = db.Exec(
@@ -146,7 +158,8 @@ func postItems(item Item, c echo.Context) error {
 	)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		res := Response{Message: "Query is not valid"}
+		return c.JSON(http.StatusInternalServerError, res)
 	}
 	return nil
 }
@@ -162,13 +175,15 @@ func addItem(c echo.Context) error {
 	image, err := c.FormFile("image")
 	if err != nil {
 		c.Logger().Errorf("Image not found: %s", image.Filename)
-		return err
+		res := Response{Message: "Image not found"}
+		return c.JSON(http.StatusBadRequest, res)
 	}
 
 	hashedImage, err := imageHash(image, c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		res := Response{Message: "Fail to hash image"}
+		return c.JSON(http.StatusInternalServerError, res)
 	}
 	stringHashedImage := hex.EncodeToString(hashedImage) + ".jpg"
 
@@ -177,9 +192,9 @@ func addItem(c echo.Context) error {
 	err = postItems(item, c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		res := Response{Message: "Fail to post items"}
+		return c.JSON(http.StatusInternalServerError, res)
 	}
-
 	return c.JSON(http.StatusOK, &item)
 }
 
@@ -188,7 +203,8 @@ func returnItemList(c echo.Context) error {
 	rows, err := getData(c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+		res := Response{Message: "Fail to get items"}
+		return c.JSON(http.StatusInternalServerError, res)
 	}
 
 	items := make(map[string][]Item)
@@ -202,8 +218,9 @@ func returnItemList(c echo.Context) error {
 
 		err := rows.Scan(&id, &name, &category, &image_name, &category_id, &category_name)
 		if err != nil {
-			c.Logger().Errorf("rows.Sran(): %v", err)
-			return err
+			c.Logger().Errorf("err: %v", err)
+			res := Response{Message: "Fail to get record"}
+			return c.JSON(http.StatusInternalServerError, res)
 		}
 
 		item := Item{Name: name, Category: category_name, Image: image_name}
@@ -219,7 +236,8 @@ func searchItem(c echo.Context) error {
 	rows, err := getData(c)
 	if err != nil {
 		c.Logger().Errorf("err: %v", err)
-		return err
+			res := Response{Message: "Fail to get items"}
+			return c.JSON(http.StatusInternalServerError, res)
 	}
 
 	searchedItems := make(map[string][]Item)
@@ -234,7 +252,8 @@ func searchItem(c echo.Context) error {
 		err := rows.Scan(&id, &name, &category, &image_name, &category_id, &category_name)
 		if err != nil {
 			c.Logger().Errorf("err: %v", err)
-			return err
+			res := Response{Message: "Fail to get record"}
+			return c.JSON(http.StatusInternalServerError, res)
 		}
 		if strconv.Itoa(id) == query || name == query || category_name == query || image_name == query {
 			item := Item{Name: name, Category: category_name, Image: image_name}
